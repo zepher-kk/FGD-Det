@@ -1,0 +1,71 @@
+# Ultralytics YOLOMM 🚀 RT-DETR Asymmetric Frequency-Guided Fusion
+# 核心策略: 跨尺度红外频域先验引导 (IR_P5->RGB_P4, IR_P4->RGB_P3) + RT-DETR Decoder
+
+# Parameters
+nc: 80 # number of classes
+scales:
+  l: [1.00, 1.00, 1024]
+
+backbone:
+  # ==================== RGB 路径 (层 0-7) ====================
+  - [-1, 1, ConvNormLayer, [32, 3, 2, None, False, 'relu'], 'RGB'] # 0-P1/2
+  - [-1, 1, ConvNormLayer, [32, 3, 1, None, False, 'relu']]        # 1
+  - [-1, 1, ConvNormLayer, [64, 3, 1, None, False, 'relu']]        # 2
+  - [-1, 1, nn.MaxPool2d, [3, 2, 1]]                               # 3-P2/4
+
+  - [-1, 1, Blocks, [64, BasicBlock, 2, 2, 'relu']]                # 4
+  - [-1, 1, Blocks, [128, BasicBlock, 2, 3, 'relu']]               # 5-P3/8 (RGB_P3) 提取
+  - [-1, 1, Blocks, [256, BasicBlock, 2, 4, 'relu']]               # 6-P4/16 (RGB_P4) 提取
+  - [-1, 1, Blocks, [512, BasicBlock, 2, 5, 'relu']]               # 7-P5/32 (RGB_P5) 提取
+
+  # ==================== X 路径 (红外/深度) (层 8-15) ====================
+  - [-1, 1, ConvNormLayer, [32, 3, 2, None, False, 'relu'], 'X']   # 8-P1/2
+  - [-1, 1, ConvNormLayer, [32, 3, 1, None, False, 'relu']]        # 9
+  - [-1, 1, ConvNormLayer, [64, 3, 1, None, False, 'relu']]        # 10
+  - [-1, 1, nn.MaxPool2d, [3, 2, 1]]                               # 11-P2/4
+
+  - [-1, 1, Blocks, [64, BasicBlock, 2, 2, 'relu']]                # 12
+  - [-1, 1, Blocks, [128, BasicBlock, 2, 3, 'relu']]               # 13-P3/8 (X_P3) 抛弃
+  - [-1, 1, Blocks, [256, BasicBlock, 2, 4, 'relu']]               # 14-P4/16 (X_P4) 提取
+  - [-1, 1, Blocks, [512, BasicBlock, 2, 5, 'relu']]               # 15-P5/32 (X_P5) 提取
+
+  # ==================== 非对称跨尺度 频域引导融合 ====================
+  # P5 顶层: 对称融合 (因为没有更高层的红外信息了)
+  - [[7, 15], 1, SymmetricFreqGuidedFusion, [512]]       # 16: RGB_P5 + IR_P5
+  - [-1, 1, C2PSA, [512]]                                # 17: Fused_P5
+
+  # P4 融合: 拿低分辨率、高语义的 IR_P5(15) 引导高分辨率 RGB_P4(6)
+  - [[6, 15], 1, DecoupledFreqGuidedFusion_BiFocus, [256]]      # 18: Fused_P4 (输出 256c)
+
+  # P3 融合: 拿低分辨率、高语义的 IR_P4(14) 引导高分辨率 RGB_P3(5)
+  - [[5, 14], 1, DecoupledFreqGuidedFusion_BiFocus, [128]]      # 19: Fused_P3 (输出 128c)
+
+# RT-DETR 专属 Transformer 检测头
+head:
+  # ============ P5 尺度 (AIFI) ============
+  - [17, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 20: 引入 Fused_P5(17) 投影到 256
+  - [-1, 1, AIFI, [1024, 8]]                       # 21:
+  - [-1, 1, Conv, [256, 1, 1]]                     # 22: Y5
+
+  # ============ FPN (Top-down) ============
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]     # 23: Y5 上采样
+  - [18, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 24: 引入跨尺度 Fused_P4(18) 并投影
+  - [[-2, -1], 1, Concat, [1]]                     # 25:
+  - [-1, 3, RepC3, [256, 0.5]]                     # 26: fpn_blocks.0
+  - [-1, 1, Conv, [256, 1, 1]]                     # 27: Y4
+
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]     # 28: Y4 上采样
+  - [19, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 29: 引入跨尺度 Fused_P3(19) 并投影
+  - [[-2, -1], 1, Concat, [1]]                     # 30:
+  - [-1, 3, RepC3, [256, 0.5]]                     # 31: X3 (P3尺度最终特征)
+
+  # ============ PAN (Bottom-up) ============
+  - [-1, 1, Conv, [256, 3, 2]]                     # 32: downsample P3
+  - [[-1, 27], 1, Concat, [1]]                     # 33:
+  - [-1, 3, RepC3, [256, 0.5]]                     # 34: F4
+
+  - [-1, 1, Conv, [256, 3, 2]]                     # 35: downsample P4
+  - [[-1, 22], 1, Concat, [1]]                     # 36:
+  - [-1, 3, RepC3, [256, 0.5]]                     # 37: F5
+
+  - [[31, 34, 37], 1, RTDETRDecoder, [nc, 256, 300, 4, 8, 3]] # 38: 端到端检测

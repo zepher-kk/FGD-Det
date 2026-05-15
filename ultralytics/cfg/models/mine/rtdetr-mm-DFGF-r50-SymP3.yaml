@@ -1,0 +1,81 @@
+# Ultralytics YOLOMM 🚀 RT-DETR Scale-Decoupled Frequency-Guided Fusion
+# SCI 论文核心卖点: 尺度感知自适应解耦融合 (Scale-Aware Decoupled Fusion)
+#   - P4/P5: 跨尺度语义增强 (Asymmetric Semantic Guidance)
+#   - P3: 同尺度高频空间保真 (Symmetric Spatial Fidelity for Tiny Objects)
+
+# Parameters
+nc: 80 # number of classes
+scales:
+  l: [1.00, 1.00, 1024]
+
+backbone:
+  # ==================== RGB 路径 (层 0-7) ====================
+  - [-1, 1, ConvNormLayer, [32, 3, 2, None, False, 'relu'], 'RGB'] # 0-P1/2
+  - [-1, 1, ConvNormLayer, [32, 3, 1, None, False, 'relu']]        # 1
+  - [-1, 1, ConvNormLayer, [64, 3, 1, None, False, 'relu']]        # 2
+  - [-1, 1, nn.MaxPool2d, [3, 2, 1]]                               # 3-P2/4
+
+  - [-1, 1, Blocks, [64, BasicBlock, 2, 2, 'relu']]                # 4
+  - [-1, 1, Blocks, [128, BasicBlock, 2, 3, 'relu']]               # 5-P3/8 (RGB_P3) 提取
+  - [-1, 1, Blocks, [256, BasicBlock, 2, 4, 'relu']]               # 6-P4/16 (RGB_P4) 提取
+  - [-1, 1, Blocks, [512, BasicBlock, 2, 5, 'relu']]               # 7-P5/32 (RGB_P5) 提取
+
+  # ==================== X 路径 (红外/深度) (层 8-15) ====================
+  - [-1, 1, ConvNormLayer, [32, 3, 2, None, False, 'relu'], 'X']   # 8-P1/2
+  - [-1, 1, ConvNormLayer, [32, 3, 1, None, False, 'relu']]        # 9
+  - [-1, 1, ConvNormLayer, [64, 3, 1, None, False, 'relu']]        # 10
+  - [-1, 1, nn.MaxPool2d, [3, 2, 1]]                               # 11-P2/4
+
+  - [-1, 1, Blocks, [64, BasicBlock, 2, 2, 'relu']]                # 12
+  # 【重大修改】：绝对不能抛弃红外 P3 层！这是小目标在红外模态的“命根子”
+  - [-1, 1, Blocks, [128, BasicBlock, 2, 3, 'relu']]               # 13-P3/8 (X_P3) 提取！
+  - [-1, 1, Blocks, [256, BasicBlock, 2, 4, 'relu']]               # 14-P4/16 (X_P4) 提取
+  - [-1, 1, Blocks, [512, BasicBlock, 2, 5, 'relu']]               # 15-P5/32 (X_P5) 提取
+
+  # ==================== 尺度解耦频域引导融合 (Scale-Decoupled Fusion) ====================
+  
+  # 【P5 融合】：顶层，重语义。同尺度对称融合。
+  - [[7, 15], 1, SymmetricFreqGuidedFusion, [512, False]]       # 16: RGB_P5 + IR_P5 (大目标/全局上下文)
+  - [-1, 1, C2PSA, [512]]                                       # 17: Fused_P5
+
+  # 【P4 融合】：中高层，重语义。保留你的跨尺度非对称设计！证明你模块的引导能力。
+  # 拿低分辨率、高语义的 IR_P5(15) 引导高分辨率 RGB_P4(6)。
+  # 参数 [256, False] -> hidden_channels=256, tiny_mode=False (双线性平滑)
+  - [[6, 15], 1, DecoupledFreqGuidedFusion, [256, False]]       # 18: Fused_P4 (中/大目标)
+
+  # 【P3 融合 - 核心突破点】：底层，重空间！严格同尺度融合！
+  # 拿 IR_P3(13) 引导 RGB_P3(5)。不要用 IR_P4 引导，那是灾难。
+  # 参数 [128, True] -> hidden_channels=128, tiny_mode=True (最近邻/高频直连，锁死小目标像素)
+  - [[5, 13], 1, DecoupledFreqGuidedFusion, [128, True]]        # 19: Fused_P3 (小目标专属通道)
+
+
+# RT-DETR 专属 Transformer 检测头 (Neck + Decoder)
+head:
+  # ============ P5 尺度 (AIFI) ============
+  - [17, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 20: 引入 Fused_P5(17) 投影到 256
+  - [-1, 1, AIFI, [1024, 8]]                       # 21: AIFI 机制
+  - [-1, 1, Conv, [256, 1, 1]]                     # 22: Y5
+
+  # ============ FPN (Top-down) 语义下传 ============
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]     # 23: Y5 上采样
+  - [18, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 24: 引入跨尺度 Fused_P4(18)
+  - [[-2, -1], 1, Concat, [1]]                     # 25:
+  - [-1, 3, RepC3, [256, 0.5]]                     # 26: fpn_blocks.0
+  - [-1, 1, Conv, [256, 1, 1]]                     # 27: Y4
+
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]     # 28: Y4 上采样
+  - [19, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 29: 引入高频保真的 Fused_P3(19)
+  - [[-2, -1], 1, Concat, [1]]                     # 30:
+  - [-1, 3, RepC3, [256, 0.5]]                     # 31: X3 (P3尺度最终特征 - 此时它完整保留了小目标的红外热点！)
+
+  # ============ PAN (Bottom-up) 空间特征回传 ============
+  - [-1, 1, Conv, [256, 3, 2]]                     # 32: downsample P3
+  - [[-1, 27], 1, Concat, [1]]                     # 33:
+  - [-1, 3, RepC3, [256, 0.5]]                     # 34: F4
+
+  - [-1, 1, Conv, [256, 3, 2]]                     # 35: downsample P4
+  - [[-1, 22], 1, Concat, [1]]                     # 36:
+  - [-1, 3, RepC3, [256, 0.5]]                     # 37: F5
+
+  # 38: RT-DETR Decoder。此时传入的 31 (X3) 包含了极其清晰的小目标高频先验。
+  - [[31, 34, 37], 1, RTDETRDecoder, [nc, 256, 300, 4, 8, 3]]

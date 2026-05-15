@@ -1,0 +1,65 @@
+# Ultralytics YOLOMM 🚀 RT-DETR with Deep_CFFM Asymmetric Fusion (R50 保留 C2PSA 完整版)
+# 用途: 用于消融实验对比，验证 C2PSA 在极深频域特征后的实际收益
+
+nc: 80 # number of classes
+scales:
+  l: [1.00, 1.00, 1024]
+
+backbone:
+  # ==================== RGB 路径 (ResNet50) ====================
+  - [-1, 1, ResNetLayer, [3, 64, 1, True, 1], 'RGB']    # 0: stem
+  - [-1, 1, ResNetLayer, [64, 64, 1, False, 3]]         # 1: layer1 (P2)
+  - [-1, 1, ResNetLayer, [256, 128, 2, False, 4]]       # 2: layer2 (RGB_P3) 提取
+  - [-1, 1, ResNetLayer, [512, 256, 2, False, 6]]       # 3: layer3 (RGB_P4) 提取
+  - [-1, 1, ResNetLayer, [1024, 512, 2, False, 3]]      # 4: layer4 (RGB_P5) 提取
+
+  # ==================== X 路径 (红外/深度) ====================
+  - [-1, 1, ResNetLayer, [3, 64, 1, True, 1], 'X']      # 5: stem
+  - [-1, 1, ResNetLayer, [64, 64, 1, False, 3]]         # 6: layer1 (P2)
+  - [-1, 1, ResNetLayer, [256, 128, 2, False, 4]]       # 7: layer2 (IR_P3) 抛弃
+  - [-1, 1, ResNetLayer, [512, 256, 2, False, 6]]       # 8: layer3 (IR_P4) 提取
+  - [-1, 1, ResNetLayer, [1024, 512, 2, False, 3]]      # 9: layer4 (IR_P5) 提取
+
+  # ==================== 频域引导融合 (Deep_CFFM) ====================
+  
+  # P5 顶层: 对称融合 [RGB_P5(4), IR_P5(9)]
+  - [[4, 9], 1, Deep_CFFM, [512, False]]        # 10: Fused_P5
+  - [-1, 1, C2PSA, [512]]                       # 11: 保留 C2PSA，对融合后的 512ch 特征进行空间注意力重构
+
+  # P4 中层融合: 跨尺度 [RGB_P4(3), IR_P5(9)]
+  - [[3, 9], 1, Deep_CFFM, [256, False]]        # 12: Fused_P4
+
+  # P3 底层融合: 跨尺度 [RGB_P3(2), IR_P4(8)]
+  # 极其关键：这是高分辨率小目标层，开启 Refiner (True)
+  - [[2, 8], 1, Deep_CFFM, [128, True]]         # 13: Fused_P3
+
+# ==================== RT-DETR 专属 Transformer 检测头 ====================
+head:
+  # ============ P5 尺度 (AIFI) ============
+  - [11, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 14: 引入经过 C2PSA(11) 处理后的 P5 特征
+  - [-1, 1, AIFI, [1024, 8]]                       # 15: Transformer Encoder
+  - [-1, 1, Conv, [256, 1, 1]]                     # 16: Y5
+
+  # ============ FPN (Top-down) ============
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]     # 17: Y5 上采样
+  - [12, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 18: 引入跨尺度 Fused_P4(12)
+  - [[-2, -1], 1, Concat, [1]]                     # 19
+  - [-1, 3, RepC3, [256, 0.5]]                     # 20: fpn_blocks.0
+  - [-1, 1, Conv, [256, 1, 1]]                     # 21: Y4
+
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]     # 22: Y4 上采样
+  - [13, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 23: 引入跨尺度 Fused_P3(13)
+  - [[-2, -1], 1, Concat, [1]]                     # 24
+  - [-1, 3, RepC3, [256, 0.5]]                     # 25: X3 (P3尺度最终特征)
+
+  # ============ PAN (Bottom-up) ============
+  - [-1, 1, Conv, [256, 3, 2]]                     # 26: downsample P3
+  - [[-1, 21], 1, Concat, [1]]                     # 27: 连接 Y4(21)
+  - [-1, 3, RepC3, [256, 0.5]]                     # 28: F4
+
+  - [-1, 1, Conv, [256, 3, 2]]                     # 29: downsample P4
+  - [[-1, 16], 1, Concat, [1]]                     # 30: 连接 Y5(16)
+  - [-1, 3, RepC3, [256, 0.5]]                     # 31: F5
+
+  # 端到端检测，最终传入 [25(X3), 28(F4), 31(F5)]
+  - [[25, 28, 31], 1, RTDETRDecoder, [nc, 256, 300, 4, 8, 3]] # 32

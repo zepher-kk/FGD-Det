@@ -1,0 +1,77 @@
+# Ultralytics YOLOMM 🚀 RT-DETR + IAF_FFCM_Fusion + P2小目标增强 (R18版)
+
+nc: 80 
+scales:
+  l: [1.00, 1.00, 1024]
+
+backbone:
+  # ==================== RGB 路径 (ResNet18) ====================
+  - [-1, 1, ConvNormLayer, [32, 3, 2, None, False, 'relu'], 'RGB'] # 0
+  - [-1, 1, ConvNormLayer, [32, 3, 1, None, False, 'relu']]        # 1
+  - [-1, 1, ConvNormLayer, [64, 3, 1, None, False, 'relu']]        # 2
+  - [-1, 1, nn.MaxPool2d, [3, 2, 1]]                               # 3
+  
+  - [-1, 1, Blocks, [64, BasicBlock, 2, 2, 'relu']]                # 4-RGB_P2 (64ch)  【新增极小目标层】
+  - [-1, 1, Blocks, [128, BasicBlock, 2, 3, 'relu']]               # 5-RGB_P3 (128ch)
+  - [-1, 1, Blocks, [256, BasicBlock, 2, 4, 'relu']]               # 6-RGB_P4 (256ch)
+  - [-1, 1, Blocks, [512, BasicBlock, 2, 5, 'relu']]               # 7-RGB_P5 (512ch)
+
+  # ==================== IR 路径 (ResNet18) ====================
+  - [-1, 1, ConvNormLayer, [32, 3, 2, None, False, 'relu'], 'X']   # 8
+  - [-1, 1, ConvNormLayer, [32, 3, 1, None, False, 'relu']]        # 9
+  - [-1, 1, ConvNormLayer, [64, 3, 1, None, False, 'relu']]        # 10
+  - [-1, 1, nn.MaxPool2d, [3, 2, 1]]                               # 11
+  
+  - [-1, 1, Blocks, [64, BasicBlock, 2, 2, 'relu']]                # 12-IR_P2 (64ch)  【新增极小目标层】
+  - [-1, 1, Blocks, [128, BasicBlock, 2, 3, 'relu']]               # 13-IR_P3 (128ch)
+  - [-1, 1, Blocks, [256, BasicBlock, 2, 4, 'relu']]               # 14-IR_P4 (256ch)
+  - [-1, 1, Blocks, [512, BasicBlock, 2, 5, 'relu']]               # 15-IR_P5 (512ch)
+
+  # ==================== 光照感知频域融合 (IAF_FFCM) ====================
+  - [[7, 15], 1, IAF_FFCM_Fusion, [512]]   # 16: Fused_P5
+  - [-1, 1, C2PSA, [512]]                  # 17: C2PSA
+  - [[6, 14], 1, IAF_FFCM_Fusion, [256]]   # 18: Fused_P4
+  - [[5, 13], 1, IAF_FFCM_Fusion, [128]]   # 19: Fused_P3
+  - [[4, 12], 1, IAF_FFCM_Fusion, [64]]    # 20: Fused_P2 (专注小目标空间保真)
+
+# ==================== 四层特征增强 Neck & Decoder ====================
+head:
+  # P5
+  - [17, 1, Conv, [256, 1, 1, None, 1, 1, False]]   # 21
+  - [-1, 1, AIFI, [1024, 8]]                        # 22
+  - [-1, 1, Conv, [256, 1, 1]]                      # 23: Y5
+
+  # FPN Top-down (引入 P2 细节)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]      # 24
+  - [18, 1, Conv, [256, 1, 1, None, 1, 1, False]]   # 25 (导入 P4)
+  - [[-2, -1], 1, Concat, [1]]                      # 26
+  - [-1, 3, RepC3, [256, 0.5]]                      # 27
+  - [-1, 1, Conv, [256, 1, 1]]                      # 28: Y4
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]      # 29
+  - [19, 1, Conv, [256, 1, 1, None, 1, 1, False]]   # 30 (导入 P3)
+  - [[-2, -1], 1, Concat, [1]]                      # 31
+  - [-1, 3, RepC3, [256, 0.5]]                      # 32
+  - [-1, 1, Conv, [256, 1, 1]]                      # 33: Y3
+
+  # 高分辨率触底 (将 P3 进一步结合 P2)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]      # 34
+  - [20, 1, Conv, [256, 1, 1, None, 1, 1, False]]   # 35 (导入 P2)
+  - [[-2, -1], 1, Concat, [1]]                      # 36
+  - [-1, 3, RepC3, [256, 0.5]]                      # 37: Y2 (小目标满配特征)
+
+  # PAN Bottom-up (提取特征喂给 Decoder)
+  - [-1, 1, Conv, [256, 3, 2]]                      # 38 (下采样 Y2)
+  - [[-1, 33], 1, Concat, [1]]                      # 39 (拼接 Y3)
+  - [-1, 3, RepC3, [256, 0.5]]                      # 40: F3 (给 Decoder 的第一层)
+
+  - [-1, 1, Conv, [256, 3, 2]]                      # 41
+  - [[-1, 28], 1, Concat, [1]]                      # 42 (拼接 Y4)
+  - [-1, 3, RepC3, [256, 0.5]]                      # 43: F4 (给 Decoder 的第二层)
+
+  - [-1, 1, Conv, [256, 3, 2]]                      # 44
+  - [[-1, 23], 1, Concat, [1]]                      # 45 (拼接 Y5)
+  - [-1, 3, RepC3, [256, 0.5]]                      # 46: F5 (给 Decoder 的第三层)
+
+  # 检测头 (接收融合了 P2 高频细节的 F3, F4, F5)
+  - [[40, 43, 46], 1, RTDETRDecoder, [nc, 256, 600, 4, 8, 3]] # 47
