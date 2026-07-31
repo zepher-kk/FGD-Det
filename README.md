@@ -42,6 +42,10 @@ Unlike conventional mirrored dual-stream designs, FGD-Det allocates larger param
 
 Designed for shallow/middle layers where geometric deviations dominate. A three-stage cascaded pipeline:
 
+<p align="center">
+  <img src="assets/fg-daf.png" alt="FG-DAF Module Architecture" width="95%">
+</p>
+
 1. **DPFR (Detail-Preserving Frequency Representation)** — lossless Focus downsampling + Frequency Enhancer with learnable spectral modulation, extracting clean high-frequency structural priors from IR.
 2. **PMDA (Prior-Modulated Deformable Alignment)** — edge-constrained offset prediction network that suppresses chaotic displacements in textureless regions, with a contrastive alignment loss explicitly supervising feature correspondence.
 3. **MDAA (Modality-Decoupled Attention Aggregation)** — group-wise attention with independent per-modality weighting, preserving single-modality semantics while enabling cross-modal synergy.
