@@ -1,0 +1,73 @@
+nc: 80
+scales:
+
+  s: [0.50, 0.50, 1024]
+
+backbone:
+
+  - [-1, 1, nn.Identity, []]
+  - [-1, 1, efficientformerv2_s0, [0, 640], 'X']
+
+  - [1, 1, GetIndex, [32,  0]]
+  - [1, 1, GetIndex, [48,  1]]
+  - [1, 1, GetIndex, [96,  2]]
+  - [1, 1, GetIndex, [176, 3]]
+
+
+  - [0, 1, efficientformerv2_s2, [0, 640], 'RGB']
+
+  - [6, 1, GetIndex, [32,  0]]
+  - [6, 1, GetIndex, [64,  1]]
+  - [6, 1, GetIndex, [144, 2]]
+  - [6, 1, GetIndex, [288, 3]]
+  
+
+  - [-1, 1, SPPF, [576, 5]]
+  - [-1, 2, C2PSA, [576]]
+
+
+
+
+  - [[12, 5], 1, SymmetricFreqGuidedFusion, [512, False]]
+  
+
+  - [[9, 3], 1, DecoupledFreqGuidedFusion_re, [256, 2]]
+  
+
+  - [[8, 2], 1, DecoupledFreqGuidedFusion_re, [128, 2]]
+
+
+head:
+
+  - [13, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 14], 1, Concat, [1]]
+  
+
+  - [-1, 2, C3k2, [512, False]]
+  
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 15], 1, Concat, [1]]
+  
+
+  - [-1, 2, C3k2, [256, False]]
+  
+
+  - [-1, 1, C2PSA, [256]]
+  
+
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 18], 1, Concat, [1]]
+  
+
+  - [-1, 2, C3k2, [512, False]]
+  
+
+  - [-1, 1, Conv, [1024, 3, 2]]
+  - [[-1, 13], 1, Concat, [1]]
+  
+
+  - [-1, 2, C3k2, [1024, True]]
+
+
+  - [[22, 25, 28], 1, Detect, [nc]]
