@@ -7,6 +7,10 @@
 
 > **FGD-Det** tackles the twin bottlenecks of multispectral detection — **information density asymmetry** and **spatial misalignment** — through a frequency-guided decoupled alignment and asymmetric fusion framework. Achieves up to **97.9% AP₅₀** and **67.9% AP₅₀:₉₅** at only **47.0–64.6 GFLOPs**, outperforming methods costing 5–30× more compute.
 
+<p align="center">
+  <img src="assets/framework.png" alt="FGD-Det Architecture" width="95%">
+</p>
+
 ---
 
 ## Abstract
